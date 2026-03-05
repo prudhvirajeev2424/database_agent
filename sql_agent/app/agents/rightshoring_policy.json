@@ -1,3 +1,195 @@
 {
-  "policies": []
+  "INTENT_POLICIES": {
+    "GREETING": {
+      "requires_llm": false,
+      "execution_mode": "static_response",
+      "cost_level": "low"
+    },
+    "DATABASE_QUERY": {
+      "requires_llm": true,
+      "execution_mode": "sql_generation",
+      "model_type": "medium",
+      "cost_level": "medium"
+    },
+    "SIMPLE_INTEREST": {
+      "requires_llm": false,
+      "execution_mode": "deterministic_calculation",
+      "cost_level": "low"
+    },
+    "OUT_OF_SCOPE": {
+      "requires_llm": false,
+      "execution_mode": "static_response",
+      "cost_level": "low"
+    },
+    "GENERAL_CONVERSATION": {
+      "requires_llm": true,
+      "execution_mode": "llm_response",
+      "model_type": "light_model",
+      "cost_level": "low"
+    },
+    "BANKING_KNOWLEDGE": {
+      "requires_llm": true,
+      "execution_mode": "llm_response",
+      "model_type": "light_model",
+      "cost_level": "low"
+    }
+  },
+
+  "COST_CONTROL": {
+    "max_tokens_sql": 1500,
+    "max_tokens_summary": 3000,
+    "heavy_model_threshold": 2000,
+    "token_limit": 6000
+  },
+
+  "RISK": {
+    "risk_keywords": [
+      "npa",
+      "aml",
+      "compliance",
+      "fraud",
+      "suspicious"
+    ],
+    "force_model": "high_security_model"
+  },
+
+  "FALLBACK": {
+    "on_validation_failure": "retry_with_stricter_prompt",
+    "max_retries": 2
+  },
+
+  "WEIGHTS": {
+    "entity_1": 1,
+    "entity_2": 3,
+    "entity_3_plus": 6,
+    "aggregation": 3,
+    "analytical": 5,
+    "sorting": 2,
+    "time_filter": 2,
+    "risk": 7
+  },
+
+  "PROMPT_COMPLEXITY_THRESHOLDS": {
+    "low": 4,
+    "medium": 9,
+    "high": 15
+  },
+
+  "MODEL_MAPPING": {
+    "low": {"type": "light_model", "llm_weightage": 0.3, "cost_factor": 1.0, "response_time_sla_ms": 2000},
+    "medium": {"type": "standard_model", "llm_weightage": 0.6, "cost_factor": 1.5, "response_time_sla_ms": 3500},
+    "high": {"type": "premium_model", "llm_weightage": 1.0, "cost_factor": 2.5, "response_time_sla_ms": 5000}
+  },
+
+  "ENTITIES": [
+    "customer",
+    "account",
+    "loan",
+    "transaction",
+    "branch"
+  ],
+
+  "AGG_KEYWORDS": [
+    "total",
+    "sum",
+    "count",
+    "average",
+    "avg",
+    "min",
+    "max",
+    "summary",
+    "aggregate",
+    "group by"
+  ],
+
+  "ANALYTICAL_KEYWORDS": [
+    "trend",
+    "analysis",
+    "compare",
+    "correlation",
+    "forecast"
+  ],
+
+  "SORTING_KEYWORDS": [
+    "sort",
+    "order by",
+    "top",
+    "bottom",
+    "highest",
+    "lowest"
+  ],
+
+  "TIME_KEYWORDS": [
+    "date",
+    "time",
+    "month",
+    "year",
+    "quarter",
+    "period",
+    "since",
+    "before",
+    "after",
+    "between"
+  ],
+
+  "SIMILARITY_THRESHOLD": 0.8,
+  
+  "TEST_CAPABILITY_KEYWORDS": [
+    "test", "suggest prompts", "sample questions", "what can you do",
+    "your capabilities", "try", "example", "demo", "test your",
+    "analytics skills", "query skills", "test questions"
+  ],
+  
+  "SAMPLE_TEST_PROMPTS": {
+    "database_queries": [
+      "Give me about customers",
+      "Show all loans in list format",
+      "Give the summary of loans",
+      "What is the total loan amount?",
+      "Show loans trends for month",
+      "Give me active customers",
+      "List all accounts with balance above 100000",
+      "Show loans by type"
+    ],
+    "financial_knowledge": [
+      "What is high risk profile?",
+      "Define NPA",
+      "Explain what AML means",
+      "What is KYC?",
+      "What does loan status mean?",
+      "Explain collateral"
+    ],
+    "general_banking": [
+      "What are the types of loans?",
+      "How is interest calculated?",
+      "What is loan tenure?",
+      "Explain the difference between personal and business loans",
+      "What factors affect loan approval?"
+    ]
+  },
+  
+  "BANKING_DOMAIN_KEYWORDS": [
+    "loan", "customer", "account", "branch", "transaction",
+    "interest", "balance", "deposit", "withdraw", "credit", "debit",
+    "risk", "aml", "kyc", "npa", "emi", "tenure", "collateral",
+    "bank", "financial", "payment", "default", "active", "closed"
+  ],
+  
+  "LLM_RESPONSE_TIME": {
+    "light_model": {"avg_ms": 1500, "p95_ms": 2000, "p99_ms": 2500, "timeout_ms": 3000},
+    "standard_model": {"avg_ms": 2500, "p95_ms": 3500, "p99_ms": 4000, "timeout_ms": 5000},
+    "premium_model": {"avg_ms": 3500, "p95_ms": 4500, "p99_ms": 5500, "timeout_ms": 7000}
+  },
+  "FINANCIAL_GLOSSARY_TERMS": {
+    "high_risk_profile": "A rating assigned to customers or loans with higher default probability. Based on failed payments, high debt-to-income ratio, or adverse credit events.",
+    "low_risk_profile": "Customers with stable payment history, good credit scores, and strong financial indicators. Lower default probability.",
+    "medium_risk_profile": "Moderate risk classification. Some payment variations or moderate debt but generally acceptable financial health.",
+    "npa": "Non-Performing Asset - Loan not serviced for 90+ days. Borrower failed to make scheduled payments.",
+    "aml": "Anti-Money Laundering - Compliance to prevent financial institutions from supporting money laundering or terrorist financing.",
+    "kyc": "Know Your Customer - Verification to authenticate customer identity and assess financial risk.",
+    "tenure": "Duration for which a loan is granted, typically in months or years.",
+    "interest_rate": "Percentage charged by lender as cost of borrowing, usually annual percentage (APR).",
+    "loan_status": "Current state of loan - ACTIVE (ongoing), CLOSED (repaid), or DEFAULTED (not serviced).",
+    "collateral": "Asset pledged to secure a loan. Lender can claim if borrower defaults."
+  }
 }
