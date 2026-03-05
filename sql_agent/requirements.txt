@@ -1,0 +1,13 @@
+# Python dependencies
+mysql-connector-python
+psycopg2-binary
+openai
+python-dotenv
+langchain
+aiohttp
+requests
+pymongo
+sqlalchemy
+pymysql
+tabulate
+aiomysql
