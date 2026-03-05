@@ -461,3 +461,136 @@ JSON only.
             "interest": amount - principal,
             "total": amount
         }
+     # ----------------------------
+    # SQL VALIDATION (LLM)
+    # ----------------------------
+    async def _validate_query(self, query: str):
+        schema = self.schema_registry.schema
+        validator_prompt = os.getenv("VALIDATOR_PROMPT")
+        if validator_prompt:
+            VALIDATOR_PROMPT = validator_prompt.format(schema=json.dumps(schema, indent=2))
+        else:
+            VALIDATOR_PROMPT = f"""
+Validate this SQL query.
+
+Rules:
+1. Only SELECT allowed.
+2. No DML or DDL.
+3. Tables must exist in schema.
+4. Columns must exist.
+
+Schema:
+{json.dumps(schema, indent=2)}
+
+Return JSON:
+{{
+  "valid": true/false,
+  "reason": "..."
+}}
+"""
+
+        messages = [
+            {"role": "system", "content": VALIDATOR_PROMPT},
+            {"role": "user", "content": query}
+        ]
+
+        resp = await self.llm.chat_completion(messages=messages, temperature=0)
+        return self._safe_json_loads(resp.choices[0].message.content)
+
+    # ----------------------------
+    # TABLE FORMAT
+    # ----------------------------
+    def _format_table(self, result):
+
+        if not result:
+            return "No records found."
+
+        headers = result[0].keys()
+        rows = [row.values() for row in result]
+
+        return "\n" + tabulate(rows, headers=headers, tablefmt="grid")
+
+    # ----------------------------
+    # PRONOUN RESOLUTION
+    # ----------------------------
+    def _contains_pronoun(self, text: str) -> bool:
+        return bool(re.search(r"\b(his|her|their|him|them|he|she)\b", text, flags=re.I))
+
+    async def _resolve_pronoun_from_history(self, text: str):
+        """Try to resolve pronouns like 'his/her/their' from recent conversation history.
+
+        Returns a dict {'referent': name, 'resolved_text': replaced_text} or None.
+        """
+
+        pronouns = re.findall(r"\b(his|her|their|him|them|he|she)\b", text, flags=re.I)
+        if not pronouns:
+            return None
+
+        # Look through recent history for possible referents
+        history = self.memory.get_history()
+        for msg in reversed(history):
+            content = msg.get("content", "")
+            if not content:
+                continue
+
+            # common patterns: 'account of NAME', 'for NAME', 'named NAME'
+            m = re.search(r"(?:account\s(?:of|for|named)\s+([A-Z][\w'\-]+))", content, flags=re.I)
+            if m:
+                name = m.group(1)
+                resolved_text = text
+                for p in set(pronouns):
+                    resolved_text = re.sub(r"\b" + p + r"\b", name, resolved_text, flags=re.I)
+                return {"referent": name, "resolved_text": resolved_text}
+
+            # fallback: pick a capitalized word that looks like a name
+            m2 = re.search(r"\b([A-Z][a-z]{2,}(?:\s[A-Z][a-z]{2,})?)\b", content)
+            if m2:
+                name = m2.group(1)
+                resolved_text = text
+                for p in set(pronouns):
+                    resolved_text = re.sub(r"\b" + p + r"\b", name, resolved_text, flags=re.I)
+                return {"referent": name, "resolved_text": resolved_text}
+
+        return None
+
+    # ----------------------------
+    # BANK-CONVERSATIONAL DETECTION
+    # ----------------------------
+    def _is_bank_conversational(self, text: str) -> bool:
+        """Return True if the text looks like a bank-related conversational request
+        (e.g., 'can you', 'what can you do', greetings about accounts) which should
+        be handled by the assistant directly rather than routed to SQL generation.
+        """
+        if not text or not isinstance(text, str):
+            return False
+
+        t = text.lower()
+
+        # greeting / casual conversational triggers
+        convo_triggers = [
+            r"^hi\b", r"^hello\b", r"^hey\b", r"thank(s| you)", r"can you", r"could you",
+            r"can i", r"could i", r"do you", r"what can you", r"how can you", r"help me",
+            r"what do you do", r"can you help"
+        ]
+
+        # banking domain terms that indicate the topic is about banking (not SQL)
+        bank_terms = [
+            "account", "balance", "transfer", "loan", "interest", "branch",
+            "statement", "deposit", "withdraw", "card", "atm", "fee", "fees"
+        ]
+
+        # If it's a simple greeting or conversational phrase, accept it — but only
+        # when the prompt does not look like a DB request (we prefer DB path
+        # for explicit data requests). This avoids treating queries like
+        # "find customers having loan status active" as mere conversation.
+        for pat in convo_triggers:
+            if re.search(pat, t):
+                if any(bt in t for bt in bank_terms) and not self._looks_like_db_request(t):
+                    return True
+
+        # If user explicitly asks about bank topics but it's not a DB request,
+        # treat as conversational.
+        if any(bt in t for bt in bank_terms) and not self._looks_like_db_request(t):
+            return True
+
+        return False
