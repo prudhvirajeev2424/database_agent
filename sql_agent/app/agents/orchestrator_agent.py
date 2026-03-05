@@ -321,4 +321,143 @@ class RightShoringAgent:
                 pass
  
         return decision
+
+class Orchestrator:
  
+    MAX_RETRIES = int(os.getenv("ORCHESTRATOR_MAX_RETRIES", 2))
+ 
+    def __init__(self, config: dict = None):
+        config = config or {}
+ 
+        try:
+            self.adapter = AdapterFactory.create_adapter()
+        except Exception as e:
+            AppLogger.error(f"Adapter creation failed: {e}")
+            raise
+ 
+        # Async connection will happen in async initialization
+        self.schema_registry = SchemaRegistry(self.adapter)
+        self.execution_engine = ExecutionEngine(self.adapter)
+        self._initialized = False
+ 
+        # Remove model_name argument
+        self.llm = LLMClient()
+        self.query_agent = QueryGeneratorAgent(self.llm, self.schema_registry)
+        self.response_agent = ResponseAgent(self.llm)
+ 
+        # Rightshoring decision layer
+        policy_path = config.get("policy_path") or (Path(__file__).parent / "rightshoring_policy.json")
+        try:
+            self.rightshoring = RightShoringAgent(policy_path=str(policy_path), config=config.get("rightshoring"))
+        except Exception:
+            self.rightshoring = RightShoringAgent(config=config.get("rightshoring"))
+        self.memory = ConversationManager(self.llm)
+ 
+        self.last_query = None
+        self.last_result = None
+ 
+    async def initialize(self):
+        """Initialize async components (connect to database, load schema)."""
+        if self._initialized:
+            return
+       
+        try:
+            await self.adapter.connect()
+            await self.schema_registry.initialize()
+            self._initialized = True
+        except Exception as e:
+            AppLogger.error(f"Failed to initialize Orchestrator: {e}")
+            raise
+ 
+    def _safe_json_loads(self, text: str):
+        """Try to parse JSON robustly from LLM outputs that may include extra text.
+ 
+        Returns parsed object or raises JSONDecodeError if unable to parse.
+        """
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Try to decode first JSON object from the string
+            try:
+                from json import JSONDecoder
+                decoder = JSONDecoder()
+                obj, idx = decoder.raw_decode(text)
+                return obj
+            except Exception:
+                pass
+ 
+            # Fallback: regex to extract first {...}
+            m = re.search(r"(\{[\s\S]*\})", text)
+            if m:
+                try:
+                    return json.loads(m.group(1))
+                except Exception:
+                    pass
+ 
+            # Give up
+            raise
+ 
+    # ----------------------------
+    # LLM INTENT ROUTER
+    # ----------------------------
+    async def _route_intent(self, question: str):
+        schema_tables = list(self.schema_registry.schema.keys())
+        router_prompt = os.getenv("ROUTER_PROMPT")
+        if router_prompt:
+            ROUTER_PROMPT = router_prompt.format(schema_tables=schema_tables)
+        else:
+            ROUTER_PROMPT = f"""
+You are an AI Orchestrator.
+ 
+Classify the user request into one of the following intents:
+ 
+- GREETING
+- GENERAL_CONVERSATION
+- SIMPLE_INTEREST
+- COMPOUND_INTEREST
+- DATABASE_QUERY
+- SESSION_SUMMARY
+- OUT_OF_SCOPE
+- SQL_QUERY
+ 
+Available Database Tables:
+{schema_tables}
+ 
+Return STRICT JSON:
+ 
+{{
+  "intent": "...",
+  "reason": "short explanation"
+}}
+ 
+JSON only.
+"""
+ 
+        messages = [
+            {"role": "system", "content": ROUTER_PROMPT},
+            {"role": "user", "content": question}
+        ]
+ 
+        resp = await self.llm.chat_completion(messages=messages, temperature=0)
+        try:
+            return self._safe_json_loads(resp.choices[0].message.content)
+        except Exception:
+            # propagate JSON parse failure to caller
+            raise
+ 
+    # ----------------------------
+    # Deterministic Interest Logic
+    # ----------------------------
+    def _compute_simple_interest(self, principal, rate, time):
+        si = principal * rate * time / 100
+        return {
+            "interest": si,
+            "total": principal + si
+        }
+ 
+    def _compute_compound_interest(self, principal, rate, time, n):
+        amount = principal * ((1 + (rate / 100) / n) ** (n * time))
+        return {
+            "interest": amount - principal,
+            "total": amount
+        }
