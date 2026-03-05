@@ -594,3 +594,343 @@ Return JSON:
             return True
 
         return False
+    
+    def _looks_like_db_request(self, text: str) -> bool:
+        if not text or not isinstance(text, str):
+            return False
+ 
+        txt = text.lower()
+        keywords = [
+            "select", "show", "list", "find", "where", "having", "customers", "accounts",
+            "top", "count", "average", "sum", "balance", "loan", "transfer", "filter", "order by",
+            "group by", "give me", "display", "report", "records", "rows"
+        ]
+        return any(k in txt for k in keywords)
+ 
+    async def handle(self, question: str):
+        if not self._initialized:
+            await self.initialize()
+ 
+        question = question.strip()
+        await self.memory.add_user(question)
+ 
+        if self._contains_pronoun(question):
+            try:
+                resolved = await self._resolve_pronoun_from_history(question)
+                if resolved and resolved.get("referent"):
+                    resolved_name = resolved.get("referent")
+                    question = resolved.get("resolved_text", question)
+                    try:
+                        await self.memory.add_assistant(f"(resolved pronoun to {resolved_name})")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        try:
+            routing = await self._route_intent(question)
+            intent = routing.get("intent")
+        except Exception:
+            intent = "DATABASE_QUERY"
+ 
+        try:
+            kb_resp = self.rightshoring._kb_search(question, intent=routing if 'routing' in locals() else None)
+            if kb_resp:
+                await self.memory.add_assistant(kb_resp)
+                return kb_resp
+        except Exception:
+            pass
+ 
+        if not intent:
+            intent = "DATABASE_QUERY"
+
+        try:
+            history = self.memory.get_history()
+            rightshoring_decision = self.rightshoring.decide(question, intent, history=history)
+            AppLogger.info(f"Rightshoring decision: {rightshoring_decision}")
+        except Exception:
+            rightshoring_decision = self.rightshoring.decide(question, None, history=None)
+        try:
+            if not rightshoring_decision.get("requires_llm", True) and rightshoring_decision.get("execution_mode") == "static_response":
+                hist = self.memory.get_history()
+                for i in range(len(hist)-1):
+                    if hist[i].get("role") == "user" and hist[i].get("content").strip() == question.strip():
+                        if i+1 < len(hist) and hist[i+1].get("role") == "assistant":
+                            cached = hist[i+1].get("content")
+                            await self.memory.add_assistant(cached)
+                            return cached
+        except Exception:
+            pass
+        if intent in ("DATABASE_QUERY", "OUT_OF_SCOPE") and self._is_bank_conversational(question):
+            intent = "GENERAL_CONVERSATION"
+ 
+        if intent == "GREETING":
+            reply = os.getenv("GREETING_REPLY", "Hello! How can I assist you today?")
+            await self.memory.add_assistant(reply)
+            return reply
+ 
+        if intent == "GENERAL_CONVERSATION":
+            system_prompt = os.getenv("GENERAL_CONVERSATION_SYSTEM_PROMPT", "You are a helpful banking assistant.")
+            resp = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question}
+                ],
+                temperature=float(os.getenv("GENERAL_CONVERSATION_TEMPERATURE", 0.2))
+            )
+            reply = resp.choices[0].message.content
+            await self.memory.add_assistant(reply)
+            return reply
+ 
+        if intent == "SESSION_SUMMARY":
+            system_prompt = os.getenv("SESSION_SUMMARY_SYSTEM_PROMPT", "Summarize the session clearly.")
+            history = self.memory.get_history()
+            hist_text = "\n".join(
+                [f"{m['role']}: {m['content']}" for m in history]
+            )
+ 
+            resp = await self.llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": hist_text}
+                ],
+                temperature=float(os.getenv("SESSION_SUMMARY_TEMPERATURE", 0))
+            )
+ 
+            reply = resp.choices[0].message.content
+            await self.memory.add_assistant(reply)
+            return reply
+ 
+        if intent == "SIMPLE_INTEREST":
+            extraction_prompt = os.getenv(
+                "SIMPLE_INTEREST_EXTRACTION_PROMPT",
+                f"""
+Extract principal, rate, time (years) from:
+"{question}"
+ 
+Return JSON:
+{{"principal": number, "rate": number, "time": number}}
+"""
+            )
+ 
+            resp = await self.llm.chat_completion(
+                messages=[{"role": "user", "content": extraction_prompt}],
+                temperature=0
+            )
+ 
+            params = self._safe_json_loads(resp.choices[0].message.content)
+ 
+            try:
+                p = float(params.get("principal", None))
+                r = float(params.get("rate", None))
+                t = float(params.get("time", None))
+            except Exception:
+                p = r = t = None
+ 
+            missing = []
+            if p is None:
+                missing.append("principal")
+            if r is None:
+                missing.append("rate")
+            if t is None:
+                missing.append("time")
+ 
+            if missing:
+                question = f"Please provide the following to compute simple interest: {', '.join(missing)}."
+                return {"status": "CLARIFICATION_REQUIRED", "question": question}
+ 
+            result = self._compute_simple_interest(p, r, t)
+ 
+            reply = f"""
+Simple Interest Calculation:
+Principal: {p}
+Rate: {r}%
+Time: {t} years
+Interest: {result['interest']}
+Total Amount: {result['total']}
+"""
+ 
+            await self.memory.add_assistant(reply)
+            return reply
+ 
+        if intent == "COMPOUND_INTEREST":
+            extraction_prompt = os.getenv(
+                "COMPOUND_INTEREST_EXTRACTION_PROMPT",
+                f"""
+Extract principal, rate, time (years), n (compounding per year)
+from:
+"{question}"
+ 
+Return JSON.
+"""
+            )
+ 
+            resp = await self.llm.chat_completion(
+                messages=[{"role": "user", "content": extraction_prompt}],
+                temperature=0
+            )
+ 
+            params = json.loads(resp.choices[0].message.content)
+ 
+            try:
+                p = float(params.get("principal", None))
+                r = float(params.get("rate", None))
+                t = float(params.get("time", None))
+                n = int(params.get("n", None))
+            except Exception:
+                p = r = t = n = None
+ 
+            missing = []
+            if p is None:
+                missing.append("principal")
+            if r is None:
+                missing.append("rate")
+            if t is None:
+                missing.append("time")
+            if n is None:
+                missing.append("n (compounding periods per year)")
+ 
+            if missing:
+                question = f"Please provide the following to compute compound interest: {', '.join(missing)}."
+                return {"status": "CLARIFICATION_REQUIRED", "question": question}
+ 
+            if n <= 0 or t < 0:
+                question = "Invalid compounding frequency or time; provide positive numeric values."
+                return {"status": "CLARIFICATION_REQUIRED", "question": question}
+ 
+            result = self._compute_compound_interest(p, r, t, n)
+ 
+            reply = f"""
+Compound Interest Calculation:
+Interest: {result['interest']}
+Total Amount: {result['total']}
+"""
+ 
+            await self.memory.add_assistant(reply)
+            return reply
+ 
+        if intent == "DATABASE_QUERY":
+ 
+            attempt = 0
+            validation_error = None
+ 
+            while attempt < self.MAX_RETRIES:
+                attempt += 1
+
+                stored_query = None
+                try:
+                    stored_query = self.rightshoring._kb_search_query(question, intent=rightshoring_decision)
+                except Exception:
+                    stored_query = None
+ 
+                if stored_query:
+                    response_json = {"status": "SUCCESS", "query": stored_query}
+                else:
+                    response_json = await self.query_agent.generate_query(
+                        question,
+                        self.memory.get_history(),
+                        intent=rightshoring_decision
+                    )
+ 
+                status = response_json.get("status")
+ 
+                if status == "CLARIFICATION_REQUIRED":
+                    return {"status": "CLARIFICATION_REQUIRED", "question": response_json.get("question")}
+ 
+                if status == "OUT_OF_SCOPE":
+                    reply = "Sorry, this request is outside the system capabilities."
+                    await self.memory.add_assistant(reply)
+                    return reply
+ 
+                if status == "ERROR":
+                    return f"Query generation error: {response_json.get('reason') or 'unknown'}"
+ 
+                query = response_json.get("query")
+                if not query:
+                    return {"status": "CLARIFICATION_REQUIRED", "question": "I couldn't generate a SQL query from your request. Could you clarify what you mean?"}
+ 
+                if hasattr(self, "validator"):
+                    validation = await self.validator.validate(query, schema=self.schema_registry.schema)
+                else:
+                    validation = await self._validate_query(query)
+ 
+                if validation.get("valid"):
+                    try:
+                        self.rightshoring.store_query_entry(question, query, intent=rightshoring_decision)
+                    except Exception:
+                        pass
+                    break
+
+                validation_error = validation.get("reason")
+                return {"status": "CLARIFICATION_REQUIRED", "question": f"I couldn't safely translate your request into SQL: {validation_error}. Could you clarify?"}
+            try:
+                result = await self.execution_engine.execute(query)
+            except Exception as e:
+                msg = str(e)
+                if 'Subquery returns more than 1 row' in msg or '1242' in msg:
+                    AppLogger.warning('Subquery returned >1 row; attempting to rewrite to IN(...) and retry')
+                    rewritten = self._rewrite_subquery_equals_to_in(query)
+                    if rewritten != query:
+                        try:
+                            result = await self.execution_engine.execute(rewritten)
+                            query = rewritten
+                        except Exception as e2:
+                            AppLogger.error(f'DB retry after rewrite failed: {e2}')
+                            return f'Database execution error after rewrite: {e2}'
+                    else:
+                        AppLogger.error('Could not rewrite query to avoid subquery-multirow error')
+                        return f'Database execution error: {e}'
+                else:
+                    AppLogger.error(f'Database execution error: {e}')
+                    return f'Database execution error: {e}'
+ 
+            self.last_query = query
+            self.last_result = result
+ 
+            response = await self.response_agent.generate_response(
+                question,
+                result,
+                detailed=False,
+                query=query
+            )
+ 
+            try:
+                self.rightshoring.store_kb_entry(question, response, intent=rightshoring_decision)
+            except Exception:
+                pass
+ 
+            await self.memory.add_assistant(response)
+            return response
+
+        reply = os.getenv("OUT_OF_SCOPE_REPLY", "Sorry, this request is outside the system capabilities.")
+        await self.memory.add_assistant(reply)
+        return reply
+ 
+    def _rewrite_subquery_equals_to_in(self, query: str) -> str:
+        join_pat = re.compile(
+            r"FROM\s+(?P<outer>\w+)\s+WHERE\s+(?P<outer_col>\w+)\s*=\s*\(\s*SELECT\s+(?P<inner_col>\w+)\s+FROM\s+(?P<inner>\w+)\s+WHERE\s+(?P<cond>[^)]+)\)",
+            flags=re.I
+        )
+        m = join_pat.search(query)
+        if m:
+            outer = m.group('outer')
+            outer_col = m.group('outer_col')
+            inner = m.group('inner')
+            inner_col = m.group('inner_col')
+            cond = m.group('cond').strip()
+            before_from = query.split('FROM', 1)[0]
+            limit = ''
+            lim_m = re.search(r"LIMIT\s+\d+", query, flags=re.I)
+            if lim_m:
+                limit = ' ' + lim_m.group(0)
+            new_q = f"{before_from}FROM {outer} JOIN {inner} ON {outer}.{outer_col} = {inner}.{inner_col} WHERE {cond}{limit}"
+            return new_q
+ 
+        pattern = re.compile(r"=\s*\((\s*select[\s\S]+?)\)", flags=re.I)
+ 
+        def _repl(m):
+            inner = m.group(1)
+            return f"IN ({inner})"
+ 
+        new_query = pattern.sub(_repl, query)
+        return new_query
+ 
